@@ -1,239 +1,277 @@
-import itertools
-import random
-import sys
-from dataclasses import dataclass
-from enum import Enum, auto
-from typing import Optional, Tuple, Any
+# controller.py
+from __future__ import annotations
 
+import logging
+import traceback
+from types import SimpleNamespace
+from typing import Any, Optional
 
-class ProblemType(Enum):
-    YOKOSAWA_OPEN = auto()
-    JUEGO_OR = auto()
+from pathlib import Path
+from core.telemetry import Telemetry
 
+from core.engine import PokerEngine, SubmitResult
+from core.models import Difficulty, ProblemType, OpenRaiseProblemContext
 
-@dataclass(frozen=True)
-class OpenRaiseProblemContext:
-    hole_cards: Tuple[str, str]         # 例: ("Ks","Jc")
-    position: str                       # "EP"/"MP"/"CO"/"BTN"
-    open_size_bb: float                 # BTN=2.5, else=3.0
-    loose_player_exists: bool           # True/False
-    excel_hand_key: str                 # 例: "KJo"
-    excel_position_key: str             # 今回は未使用（将来用）
+logger = logging.getLogger("poker_trainer.controller")
 
 
 class GameController:
-    def __init__(self, ui, juego_judge, yokosawa_judge):
+    """
+    UI(Tkinter) ⇄ core(engine) の配線役。
+    - 状態は engine が持つ
+    - controller は UI更新 + レンジ表ポップアップ描画
+    """
+
+    def __init__(self, ui, engine: PokerEngine, enable_debug: bool = False):
         self.ui = ui
-        self.juego_judge = juego_judge
-        self.yokosawa_judge = yokosawa_judge
+        self.engine = engine
+        self.enable_debug = bool(enable_debug)
 
-        self.problem_type: Optional[ProblemType] = None
-        self.context: Optional[OpenRaiseProblemContext] = None
-
-        suits = ["s", "h", "d", "c"]
-        ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
-        self.deck = [r + s for r, s in itertools.product(ranks, suits)]
-
-    # =========================
-    # 内部ログ（print が見えない環境でも UI に出す）
-    # =========================
-    def _log(self, msg: str) -> None:
+    def _ui_call(self, name: str, *args, **kwargs):
+        fn = getattr(self.ui, name, None)
+        if not callable(fn):
+            return None
         try:
-            print(msg, flush=True)
-            try:
-                sys.stdout.flush()
-            except Exception:
-                pass
-        except Exception:
-            pass
+            return fn(*args, **kwargs)
+        except Exception as e:
+            logger.warning("[CTRL] ui.%s failed: %s", name, e)
+            if self.enable_debug:
+                logger.debug("Traceback:\n%s", traceback.format_exc())
+            return None
 
-        # UI にも出す（最低限、見える）
-        try:
-            if hasattr(self.ui, "show_text"):
-                self.ui.show_text(msg)
-        except Exception:
-            pass
+    
+    def _telemetry(self) -> Telemetry:
+        # __init__ を触らずに遅延生成（最小差分）
+        if not hasattr(self, "_telemetry_obj") or self._telemetry_obj is None:
+            # controller.py がプロジェクト直下にある前提で project_root を推定
+            project_root = Path(__file__).resolve().parent
+            self._telemetry_obj = Telemetry(project_root=project_root)
+        return self._telemetry_obj
+        
 
-    # =========================
-    # 開始（メニュー等から呼ぶ）
-    # =========================
-    def start_yokosawa_open(self):
-        self._log("[CTRL] start_yokosawa_open clicked")
-        self.problem_type = ProblemType.YOKOSAWA_OPEN
+
+        # -------------------------
+        # Start / Reset
+        # -------------------------
+    def start_yokosawa_open(self) -> None:
+        self.engine.start_yokosawa_open()
         self.new_question()
 
-    def start_juego_beginner(self):
-        self._log("[CTRL] start_juego_beginner clicked")
-        self.problem_type = ProblemType.JUEGO_OR
+    def start_juego_beginner(self) -> None:
+        self.engine.start_juego(Difficulty.BEGINNER)
         self.new_question()
 
-    # =========================
-    # 新しい問題
-    # =========================
-    def new_question(self):
-        self._log(f"[CTRL] new_question called. problem_type={self.problem_type}")
+    def start_juego_intermediate(self) -> None:
+        self.engine.start_juego(Difficulty.INTERMEDIATE)
+        self.new_question()
 
-        # Next は「回答後に表示」したいので、問題生成時点では隠す
-        if hasattr(self.ui, "hide_next_button"):
-            try:
-                self.ui.hide_next_button()
-            except Exception as e:
-                self._log(f"[CTRL] hide_next_button failed: {e}")
+    def start_juego_advanced(self) -> None:
+        self.engine.start_juego(Difficulty.ADVANCED)
+        self.new_question()
 
-        if self.problem_type == ProblemType.YOKOSAWA_OPEN:
-            hole = tuple(random.sample(self.deck, 2))
-            self.ui.deal_cards(hole)
-            self.ui.show_text("【ヨコサワ式】オープン判断。あなたのアクションは？")
+    def reset_state(self) -> None:
+        self.engine.reset_state()
+
+        # -------------------------
+        # Next question
+        # -------------------------
+    def new_question(self) -> None:
+        self._ui_call("close_range_grid_popup")
+        self._ui_call("unlock_all_answer_buttons")
+
+        self._ui_call("hide_next_button")
+        self._ui_call("hide_followup_size_buttons")
+
+        if self.engine.current_problem == ProblemType.YOKOSAWA_OPEN:
+            self.ui.show_text("【ヨコサワ式】オープンレイズ問題（未実装/既存実装に合わせてください）")
             return
 
-        if self.problem_type == ProblemType.JUEGO_OR:
-            self.context = self._generate_juego_open_raise_problem()
-            self.ui.deal_cards(self.context.hole_cards)
+        if self.engine.difficulty is None:
+            self.ui.show_text("難易度を選択してください（初級/中級/上級）")
+            return
 
-            # UI 仕様に合わせて統一：set_hand_pos
-            if hasattr(self.ui, "set_hand_pos"):
-                self.ui.set_hand_pos(
-                    hand=self.context.excel_hand_key,
-                    pos=self.context.position,
+        try:
+            generated = self.engine.new_question()
+        except Exception as e:
+            self.ui.show_text(f"内部エラー：問題生成に失敗しました: {e}")
+            logger.error("[CTRL] engine.new_question failed: %s", e, exc_info=True)
+            return
+
+        # ★ここに追加：表示ラベルは “生成結果” に従う（最も安全）
+        mode = getattr(generated, "answer_mode", "")     
+
+        self._ui_call("set_answer_mode", getattr(generated, "answer_mode", ""))
+
+        ctx = generated.ctx
+        self._ui_call("deal_cards", ctx.hole_cards)
+        self._ui_call("set_hand_pos", hand=ctx.excel_hand_key, pos=ctx.position)
+
+        self.ui.show_text(generated.header_text)
+
+        # --- Telemetry: question_shown ---
+        try:
+            self._telemetry().on_question_shown(
+                engine=self.engine,
+                ctx=ctx,
+                answer_mode=getattr(generated, "answer_mode", "") or "",
+                header_text=generated.header_text or "",
+            )
+        except Exception as e:
+            logger.warning("[CTRL] telemetry question_shown failed: %s", e, exc_info=True)
+
+        # -------------------------
+        # Submit
+        # -------------------------
+    def submit(self, user_action: Optional[str] = None) -> None:
+        res: SubmitResult = self.engine.submit(user_action)
+        # --- Telemetry: answer_submitted ---
+        try:
+            ctx = getattr(self.engine, "context", None)  # 直近問題のctx（あなたの設計だとここが正）
+            if ctx is not None:
+                # answer_mode は「直近表示のgenerated」から取るのが理想だが、
+                # 最小実装として engine 側/ctx 側に無いなら空でOK
+                answer_mode = ""
+                self._telemetry().on_answer_submitted(
+                    engine=self.engine,
+                    ctx=ctx,
+                    answer_mode=answer_mode,
+                    user_action=user_action or "",
+                    res=res,
                 )
+        except Exception as e:
+            logger.warning("[CTRL] telemetry answer_submitted failed: %s", e, exc_info=True)
 
-            # ルース時だけ文言を変える（判定タグは表示しない）
-            extra = "（相手はルース）" if self.context.loose_player_exists else ""
 
-            self.ui.show_text(
-                f"【JUEGO】オープンレイズ判断｜"
-                f"Pos: {self.context.position}｜"
-                f"{self.context.open_size_bb}BB"
-                f"{extra}"
+        if res is None:
+            self.ui.show_text("[BUG] engine.submit() returned None. Check engine.submit() return paths.")
+            return
+
+        # 1) 結果テキスト
+        self.ui.show_text(res.text)
+
+        # 2) follow-up UI の掃除（必要なときだけ）
+        if getattr(res, "hide_followup_buttons", False):
+            self._ui_call("hide_followup_size_buttons")
+
+        # 3) follow-up 表示が最優先：このとき Next は必ず隠して終了
+        if getattr(res, "show_followup_buttons", False):
+            self._ui_call("hide_next_button")
+            choices = res.followup_choices or [2, 2.25, 2.5, 3]
+            self._ui_call(
+                "show_followup_size_buttons",
+                choices=choices,
+                prompt=res.followup_prompt,
             )
             return
 
-        # モード未選択など
-        self.ui.show_text("モードを選択してください")
+        # 4) Next
+        if getattr(res, "show_next_button", False):
+            self._ui_call("show_next_button")
+        else:
+            self._ui_call("hide_next_button")
 
-    # =========================
-    # 回答
-    # =========================
-    def submit(self, hand: Optional[str] = None, pos: Optional[str] = None, user_action: Optional[str] = None):
-        self._log(f">>> SUBMIT CALLED hand={hand} pos={pos} user_action={user_action}")
+        # 5) 不正解ならレンジ表（follow-up不正解も含む）
+        if res.is_correct is False and self.engine.context is not None:
+            jr = res.judge_result
+            if jr is None:
+                jr = SimpleNamespace(reason=res.text, debug={})
 
+            if getattr(jr, "correct", None) is True:
+                dbg = getattr(jr, "debug", None) or {}
+                jr = SimpleNamespace(reason=getattr(jr, "reason", ""), debug=dbg)
+
+            self._try_show_range_grid_on_incorrect(
+                ctx=self.engine.context,
+                result=jr,
+                override_reason=res.text,
+            )
+        # -------------------------
+        # Range popup
+        # -------------------------
+    def _try_show_range_grid_on_incorrect(self, ctx: OpenRaiseProblemContext, result: Any, override_reason: str | None = None) -> None:
+        """
+        不正解時にだけ、参照しているレンジ表をポップアップで表示する。
+        follow-up不正解のときは override_reason に follow-up文言を渡す。
+        """
         try:
-            if self.problem_type is None:
-                self.ui.show_text("モードを選択してください")
+            if not hasattr(self.ui, "show_range_grid_popup"):
                 return
 
-            # UI から hand/pos を取れる設計なら補完（切り分け用）
-            if (hand is None or pos is None) and hasattr(self.ui, "get_hand_pos"):
-                try:
-                    hp = self.ui.get_hand_pos()
-                    if isinstance(hp, tuple) and len(hp) >= 2:
-                        hand = hand or hp[0]
-                        pos = pos or hp[1]
-                    elif isinstance(hp, dict):
-                        hand = hand or hp.get("hand")
-                        pos = pos or hp.get("pos")
-                except Exception as e:
-                    self._log(f"[CTRL] get_hand_pos failed: {e}")
+            dbg = getattr(result, "debug", None) or {}
 
-            # -------------------------
-            # ヨコサワ式
-            # -------------------------
-            if self.problem_type == ProblemType.YOKOSAWA_OPEN:
-                if self.yokosawa_judge is None:
-                    raise RuntimeError("yokosawa_judge is not set")
-                if hand is None or pos is None or user_action is None:
-                    raise RuntimeError(f"Missing args for YOKOSAWA_OPEN: hand={hand}, pos={pos}, action={user_action}")
+            kind = (dbg.get("kind") or "").strip()
+            pos = (dbg.get("position") or dbg.get("pos") or "").strip()
 
-                result = self.yokosawa_judge.judge(pos=pos, hand=hand)
-                is_correct = (user_action == getattr(result, "action", None))
-                reason = getattr(result, "reason", "")
+            # debug に無ければ engine.current_problem / ctx から復元
+            if not kind:
+                cp = self.engine.current_problem
+                if cp == ProblemType.JUEGO_OR:
+                    kind = "OR"
+                elif cp == ProblemType.JUEGO_OR_SB:
+                    kind = "OR_SB"
+                elif cp == ProblemType.JUEGO_ROL:
+                    kind = "ROL"
 
-                self.ui.show_text(f"{'正解' if is_correct else '不正解'}：{reason}")
+            if not pos:
+                cp = self.engine.current_problem
+                if cp == ProblemType.JUEGO_OR_SB:
+                    pos = "SB"
+                else:
+                    pos = ctx.excel_position_key or ctx.position
+
+            if not kind or not pos:
                 return
 
-            # -------------------------
-            # JUEGO OR
-            # -------------------------
-            if self.problem_type == ProblemType.JUEGO_OR:
-                if self.context is None:
-                    raise RuntimeError("Context is missing")
-                if user_action is None:
-                    raise RuntimeError("user_action is missing")
+            # repo の取り出し（ui.repo / judge.repo / judge._repo）
+            repo = None
+            if hasattr(self.ui, "repo"):
+                repo = getattr(self.ui, "repo")
+            if repo is None and hasattr(self.engine.juego_judge, "repo"):
+                repo = getattr(self.engine.juego_judge, "repo")
+            if repo is None and hasattr(self.engine.juego_judge, "_repo"):
+                repo = getattr(self.engine.juego_judge, "_repo")
 
-                ctx = self.context
-
-                self._log("[CTRL] about to call juego_judge.judge_or()")
-                result = self.juego_judge.judge_or(
-                    position=ctx.position,
-                    hand=ctx.excel_hand_key,
-                    user_action=user_action,
-                    loose=ctx.loose_player_exists,
-                )
-
-                # debug 表示（既存仕様）
-                debug_obj = getattr(result, "debug", None)
-                self._log("=== JUEGO DEBUG ===")
-                self._log(str(debug_obj) if debug_obj is not None else "NO_DEBUG")
-                self._log("===================")
-
-                is_correct = bool(getattr(result, "correct", False))
-                reason = getattr(result, "reason", "")
-                self.ui.show_text(f"{'正解' if is_correct else '不正解'}：{reason}")
+            if repo is None or not hasattr(repo, "get_range_grid_view"):
                 return
 
-            # 万一ここに来たら
-            self.ui.show_text("未対応のモードです")
-            return
+            grid_view = repo.get_range_grid_view(kind, pos)
+
+            highlight_rc = None
+            if hasattr(repo, "hand_to_grid_rc"):
+                c1, c2 = ctx.hole_cards
+                highlight_rc = repo.hand_to_grid_rc(c1, c2)
+
+            expected = str(dbg.get("expected_action") or dbg.get("expected") or "").strip()
+            exp_size = dbg.get("expected_raise_size_bb", None)
+
+            info = ""
+            if expected:
+                info = f"Expected: {expected}"
+                if isinstance(exp_size, (int, float)):
+                    info += f"  (size={float(exp_size)}bb)"
+                info += "\n"
+
+            # reason（follow-up不正解なら差し替える）
+            reason = (override_reason or str(getattr(result, "reason", "") or "")).strip()
+            if reason:
+                info += reason
+
+            title = f"{grid_view.kind} / {grid_view.pos}  [sheet={grid_view.sheet_name}]"
+
+            self._ui_call(
+                "show_range_grid_popup",
+                title=title,
+                grid_cells=grid_view.cells,
+                highlight_rc=highlight_rc,
+                info_text=info,
+                on_next=self.new_question,
+            )
 
         except Exception as e:
-            self.ui.show_text(f"内部エラー：{e}")
-            self._log(f"[CTRL] Exception in submit: {e}")
-            raise
+            logger.warning("[CTRL] show_range_grid_popup failed: %s", e)
+            if self.enable_debug:
+                logger.debug("Traceback:\n%s", traceback.format_exc())
 
-        finally:
-            # 次へは UI の Next ボタンに任せる
-            if hasattr(self.ui, "show_next_button"):
-                try:
-                    self.ui.show_next_button()
-                except Exception as e:
-                    self._log(f"[CTRL] show_next_button failed: {e}")
 
-    # =========================
-    # 問題生成（JUEGO OR）
-    # =========================
-    def _generate_juego_open_raise_problem(self) -> OpenRaiseProblemContext:
-        card1, card2 = random.sample(self.deck, 2)
-        position = random.choice(["EP", "MP", "CO", "BTN"])
-        loose = random.choice([True, False])
-        open_size = 2.5 if position == "BTN" else 3.0
 
-        hand_key = self._to_hand_key(card1, card2)
 
-        return OpenRaiseProblemContext(
-            hole_cards=(card1, card2),
-            position=position,
-            open_size_bb=open_size,
-            loose_player_exists=loose,
-            excel_hand_key=hand_key,
-            excel_position_key=position,
-        )
-
-    def _to_hand_key(self, c1: str, c2: str) -> str:
-        r1, s1 = c1[0], c1[1]
-        r2, s2 = c2[0], c2[1]
-
-        ranks = "AKQJT98765432"
-
-        # 強いランクを先に（AKQ... が先）
-        if ranks.index(r1) > ranks.index(r2):
-            r1, r2 = r2, r1
-            s1, s2 = s2, s1
-
-        # ペア
-        if r1 == r2:
-            return r1 + r2
-
-        # suited / offsuit
-        if s1 == s2:
-            return r1 + r2 + "s"
-        return r1 + r2 + "o"
