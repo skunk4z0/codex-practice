@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+# local assets (large)
+juego_ranges.xlsx
+~$juego_ranges.xlsx
+cards/
+yokosawarange/
+
+# virtual env
+.venv/
+venv/
+env/
