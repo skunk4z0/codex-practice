@@ -9,8 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 def _normalize_hand_to_key(hand: str) -> str:
     return (hand or "").strip().upper().replace(" ", "")
 
-@dataclass(frozen=True)
-    note: str = ""
+
 
 class JsonRangeRepository:
     """
