@@ -55,6 +55,30 @@ def get_mode_spec(mode: str) -> list[tuple[str, str, str]]:
     return mode_spec
 
 
+def get_button_spec(
+    problem_type: object,
+    ctx: object | None,
+    answer_mode: str = "",
+) -> list[tuple[str, str, str]]:
+    pt = getattr(problem_type, "name", str(problem_type)).upper()
+
+    if pt in {"JUEGO_OR", "JUEGO_OR_SB"}:
+        return get_mode_spec("OR")
+    if pt == "JUEGO_3BET":
+        return get_mode_spec("3BET")
+    if pt == "JUEGO_ROL":
+        if ctx is None:
+            return get_mode_spec(answer_mode or "OR")
+        pos = getattr(ctx, "position", "")
+        if pos == "BBvsSB":
+            return get_mode_spec("ROL_BBVS_SB")
+        if pos == "BB_OOP":
+            return get_mode_spec("ROL_BB_OOP")
+        return get_mode_spec("ROL_NONBB")
+
+    return get_mode_spec(answer_mode or "OR")
+
+
 def _contrast_text_color(rgb: str) -> str:
     try:
         r = int(rgb[0:2], 16); g = int(rgb[2:4], 16); b = int(rgb[4:6], 16)
@@ -234,9 +258,7 @@ class PokerTrainerUI:
     # -------------------------
     # Answer mode（Controller -> UI）
     # -------------------------
-    def set_answer_mode(self, mode: str) -> None:
-        mode_spec = get_mode_spec(mode)
-
+    def _apply_button_spec(self, spec: list[tuple[str, str, str]]) -> None:
         # まず必ず全ボタンを外す（前状態の影響を断つ）
         for b in (self.btn_fold, self.btn_raise, self.btn_limp_call):
             self._tk_call("pack_forget answer button", b.pack_forget)
@@ -246,10 +268,23 @@ class PokerTrainerUI:
             "raise": self.btn_raise,
             "limp_call": self.btn_limp_call,
         }
-        for slot, label, action in mode_spec:
+        for slot, label, action in spec:
             btn = button_by_slot[slot]
             btn.config(text=label, command=lambda a=action: self.on_answer(a))
             btn.pack(side=tk.LEFT, padx=5)
+
+    def set_answer_mode(self, mode: str) -> None:
+        mode_spec = get_mode_spec(mode)
+        self._apply_button_spec(mode_spec)
+
+    def set_answer_for_question(
+        self,
+        problem_type: object,
+        ctx: object | None,
+        answer_mode: str = "",
+    ) -> None:
+        spec = get_button_spec(problem_type, ctx, answer_mode)
+        self._apply_button_spec(spec)
 
     # -------------------------
     # Tk call safe wrapper（例外安全化）
