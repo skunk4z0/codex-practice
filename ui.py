@@ -11,6 +11,49 @@ import config
 
 logger = logging.getLogger("poker_trainer.ui")
 
+# mode -> [(slot, label, action), ...]
+# slot: "fold" | "raise" | "limp_call"
+MODE_BUTTON_TABLE: dict[str, list[tuple[str, str, str]]] = {
+    "OR": [
+        ("fold", "FOLD", "FOLD"),
+        ("raise", "RAISE", "RAISE"),
+        ("limp_call", "LIMP/CALL", "LIMP_CALL"),
+    ],
+    "3BET": [
+        ("fold", "FOLD", "FOLD"),
+        ("raise", "3BET", "RAISE"),  # 表示だけ3BET
+        ("limp_call", "CALL", "CALL"),
+    ],
+    "ROL_NONBB": [
+        ("fold", "FOLD", "FOLD"),
+        ("raise", "RAISE", "RAISE"),
+        ("limp_call", "CALL", "CALL"),
+    ],
+    "ROL_BB_OOP": [
+        ("fold", "FOLD", "FOLD"),
+        ("limp_call", "CALL", "CALL"),
+        ("raise", "RAISE", "RAISE"),
+    ],
+    "ROL_BBVS_SB": [
+        ("fold", "CHECK", "CHECK"),
+        ("raise", "RAISE", "RAISE"),
+    ],
+}
+
+MODE_ALIAS: dict[str, str] = {
+    "OR_SB": "OR",
+}
+
+
+def get_mode_spec(mode: str) -> list[tuple[str, str, str]]:
+    m = (mode or "").strip().upper()
+    canonical = MODE_ALIAS.get(m, m)
+    mode_spec = MODE_BUTTON_TABLE.get(canonical)
+    if mode_spec is None:
+        logger.error("Unknown answer mode: %r", mode)
+        raise ValueError(f"Unknown answer mode: {mode!r}")
+    return mode_spec
+
 
 def _contrast_text_color(rgb: str) -> str:
     try:
@@ -192,66 +235,21 @@ class PokerTrainerUI:
     # Answer mode（Controller -> UI）
     # -------------------------
     def set_answer_mode(self, mode: str) -> None:
-        
-        m = (mode or "").strip().upper()
+        mode_spec = get_mode_spec(mode)
 
         # まず必ず全ボタンを外す（前状態の影響を断つ）
         for b in (self.btn_fold, self.btn_raise, self.btn_limp_call):
             self._tk_call("pack_forget answer button", b.pack_forget)
 
-        if m in ("OR", "OR_SB"):
-            self.btn_fold.config(text="FOLD", command=lambda: self.on_answer("FOLD"))
-            self.btn_raise.config(text="RAISE", command=lambda: self.on_answer("RAISE"))
-            self.btn_limp_call.config(text="LIMP/CALL", command=lambda: self.on_answer("LIMP_CALL"))
-
-            self.btn_fold.pack(side=tk.LEFT, padx=5)
-            self.btn_raise.pack(side=tk.LEFT, padx=5)
-            self.btn_limp_call.pack(side=tk.LEFT, padx=5)
-
-        elif m == "3BET":
-            # ★追加：3BET用
-            self.btn_fold.config(text="FOLD", command=lambda: self.on_answer("FOLD"))
-            self.btn_raise.config(text="3BET", command=lambda: self.on_answer("RAISE"))  # 表示だけ3BET
-            self.btn_limp_call.config(text="CALL", command=lambda: self.on_answer("CALL"))
-
-            self.btn_fold.pack(side=tk.LEFT, padx=5)
-            self.btn_raise.pack(side=tk.LEFT, padx=5)
-            self.btn_limp_call.pack(side=tk.LEFT, padx=5)
-
-        elif m == "ROL_NONBB":
-            self.btn_fold.config(text="FOLD", command=lambda: self.on_answer("FOLD"))
-            self.btn_raise.config(text="RAISE", command=lambda: self.on_answer("RAISE"))
-            self.btn_limp_call.config(text="CALL", command=lambda: self.on_answer("CALL"))
-
-            self.btn_fold.pack(side=tk.LEFT, padx=5)
-            self.btn_raise.pack(side=tk.LEFT, padx=5)
-            self.btn_limp_call.pack(side=tk.LEFT, padx=5)
-
-        elif m == "ROL_BB_OOP":
-            self.btn_fold.config(text="FOLD", command=lambda: self.on_answer("FOLD"))
-            self.btn_limp_call.config(text="CALL", command=lambda: self.on_answer("CALL"))
-            self.btn_raise.config(text="RAISE", command=lambda: self.on_answer("RAISE"))
-
-            self.btn_fold.pack(side=tk.LEFT, padx=5)
-            self.btn_limp_call.pack(side=tk.LEFT, padx=5)
-            self.btn_raise.pack(side=tk.LEFT, padx=5)
-
-        elif m == "ROL_BBVS_SB":
-            self.btn_fold.config(text="CHECK", command=lambda: self.on_answer("CHECK"))
-            self.btn_raise.config(text="RAISE", command=lambda: self.on_answer("RAISE"))
-
-            self.btn_fold.pack(side=tk.LEFT, padx=5)
-            self.btn_raise.pack(side=tk.LEFT, padx=5)
-
-        else:
-            # 想定外は安全側でORに戻す
-            self.btn_fold.config(text="FOLD", command=lambda: self.on_answer("FOLD"))
-            self.btn_raise.config(text="RAISE", command=lambda: self.on_answer("RAISE"))
-            self.btn_limp_call.config(text="LIMP_CALL", command=lambda: self.on_answer("LIMP_CALL"))
-
-            self.btn_fold.pack(side=tk.LEFT, padx=5)
-            self.btn_raise.pack(side=tk.LEFT, padx=5)
-            self.btn_limp_call.pack(side=tk.LEFT, padx=5)
+        button_by_slot = {
+            "fold": self.btn_fold,
+            "raise": self.btn_raise,
+            "limp_call": self.btn_limp_call,
+        }
+        for slot, label, action in mode_spec:
+            btn = button_by_slot[slot]
+            btn.config(text=label, command=lambda a=action: self.on_answer(a))
+            btn.pack(side=tk.LEFT, padx=5)
 
     # -------------------------
     # Tk call safe wrapper（例外安全化）
