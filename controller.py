@@ -97,12 +97,17 @@ class GameController:
             logger.error("[CTRL] engine.new_question failed: %s", e, exc_info=True)
             return
 
-        # ★ここに追加：表示ラベルは “生成結果” に従う（最も安全）
-        mode = getattr(generated, "answer_mode", "")     
-
-        self._ui_call("set_answer_mode", getattr(generated, "answer_mode", ""))
-
         ctx = generated.ctx
+        if hasattr(self.ui, "set_answer_for_question"):
+            self._ui_call(
+                "set_answer_for_question",
+                generated.problem_type,
+                generated.ctx,
+                generated.answer_mode,
+            )
+        else:
+            self._ui_call("set_answer_mode", generated.answer_mode)
+
         self._ui_call("deal_cards", ctx.hole_cards)
         self._ui_call("set_hand_pos", hand=ctx.excel_hand_key, pos=ctx.position)
 
@@ -271,7 +276,6 @@ class GameController:
             logger.warning("[CTRL] show_range_grid_popup failed: %s", e)
             if self.enable_debug:
                 logger.debug("Traceback:\n%s", traceback.format_exc())
-
 
 
 
